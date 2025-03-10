@@ -1,0 +1,151 @@
+library(caret)
+library(smotefamily)
+library(NoiseFiltersR)
+library(e1071)
+library(pROC)
+library(MLmetrics)
+# Cargar datos
+gendata <- read.table("gendata.csv", header = TRUE, sep = ";")
+gendata$class <- as.factor(gendata$class)
+# Configurar validación cruzada
+set.seed(123) # para reproducibilidad
+folds <- createFolds(gendata$class, k = 5, list = TRUE, returnTrain = TRUE)
+# Preparar para almacenar modelos y métricas de rendimiento para cada 
+algoritmo
+models_list <- list(svm_models = list(), rf_models = list(), j48_models =
+list())
+performance_metrics <- list(svm = list(), rf = list(), j48 = list())
+# Bucle a través de cada fold
+for(i in seq_along(folds)) {
+ # Dividir datos en conjuntos de entrenamiento y prueba
+ trainData <- gendata[folds[[i]], ]
+testData <- gendata[-folds[[i]], ]
+ 
+ # Aplicar SMOTE a los datos de entrenamiento
+ syntheticData <- smotefamily::SMOTE(X = trainData[,-ncol(trainData)],
+ target = trainData[,ncol(trainData)],
+ K = 5)$syn_data
+ 
+ # Combinar datos de entrenamiento originales con datos sintéticos 
+generados por SMOTE
+ combinedData <- rbind(trainData, syntheticData)
+ combinedData$class <- as.factor(combinedData$class)
+ 
+ # Aplicar ENN al conjunto de datos combinado
+ filteredData <- ENN(combinedData, classColumn =
+ncol(combinedData))$cleanData
+ 
+ # Configuración común de trainControl para todos los modelos
+ fitControl <- trainControl(
+ method = "none",
+ savePredictions = "final",
+ classProbs = TRUE,
+ summaryFunction = twoClassSummary
+ )
+ 
+ # Entrenar modelo SVM
+ svm_model <- train(class ~ ., data = filteredData, method = "svmRadial",
+ trControl = fitControl, preProcess = "scale", metric =
+"ROC")
+ models_list$svm_models[[i]] <- svm_model
+ 
+ # Entrenar modelo Random Forest
+ rf_model <- train(class ~ ., data = filteredData, method = "rf",
+ trControl = fitControl, metric = "ROC")
+ models_list$rf_models[[i]] <- rf_model
+ 
+ # Entrenar modelo J48
+ j48_model <- train(class ~ ., data = filteredData, method = "J48",
+ trControl = fitControl, metric = "ROC")
+ models_list$j48_models[[i]] <- j48_model
+ 
+ # Evaluar el rendimiento del modelo en el conjunto de prueba para cada 
+modelo
+ for(model_type in names(models_list)) {
+ probabilities <- predict(models_list[[model_type]][[i]], testData, type 
+= "prob")
+ predicted_classes <- predict(models_list[[model_type]][[i]], testData,
+type = "raw")
+ actual_classes <- testData$class
+ cm <- confusionMatrix(data = predicted_classes, reference =
+actual_classes)
+ 
+ # Cálculo personalizado de MCC
+ tp <- as.numeric(cm$table[1, 1]) # Verdaderos Positivos
+ tn <- as.numeric(cm$table[2, 2]) # Verdaderos Negativos
+ fp <- as.numeric(cm$table[1, 2]) # Falsos Positivos
+ fn <- as.numeric(cm$table[2, 1]) # Falsos Negativos
+ denom = sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+ if (denom == 0) {
+ mcc = 0 
+ } else {
+ mcc = (tp * tn - fp * fn) / denom
+
+}
+ roc <- roc(response = actual_classes, predictor = probabilities[,2])
+ auc_value <- roc$auc
+ 
+ accuracy <- (tp + tn) / (tp + tn + fp + fn)
+ sensitivity <- cm$byClass['Sensitivity']
+ specificity <- cm$byClass['Specificity']
+ precision <- cm$byClass['Precision']
+ f1 <- cm$byClass['F1']
+ geom_average = sqrt(sensitivity * specificity)
+ 
+ performance_metrics[[model_type]][[i]] <- list(
+ AUC = auc_value,
+ Accuracy = accuracy,
+ Sensitivity = sensitivity,
+ Specificity = specificity,
+ F1 = f1,
+ MCC = mcc,
+ Geom_average = geom_average,
+ Precision = precision
+ )
+ }
+}
+print(performance_metrics)
+# Inicializar una lista para almacenar las métricas promedio para cada 
+modelo
+average_metrics <- list(svm = list(), rf = list(), j48 = list())
+# Calcular el promedio de cada métrica para los modelos SVM
+for(metric in c("Accuracy", "Precision", "Sensitivity", "Specificity",
+"Geom_average", "F1", "AUC", "MCC")) {
+ metric_values <- sapply(performance_metrics$svm, function(x) x[[metric]])
+ average_metrics$svm[[metric]] <- mean(metric_values)
+}
+# Calcular el promedio de cada métrica para los modelos RF
+for(metric in c("Accuracy", "Precision", "Sensitivity", "Specificity",
+"Geom_average", "F1", "AUC", "MCC")) {
+ metric_values <- sapply(performance_metrics$rf, function(x) x[[metric]])
+ average_metrics$rf[[metric]] <- mean(metric_values)
+}
+# Calcular el promedio de cada métrica para los modelos J48
+for(metric in c("Accuracy", "Precision", "Sensitivity", "Specificity",
+"Geom_average", "F1", "AUC", "MCC")) {
+ metric_values <- sapply(performance_metrics$j48, function(x) x[[metric]])
+ average_metrics$j48[[metric]] <- mean(metric_values)
+}
+# Imprimir las métricas promedio para cada modelo
+print(average_metrics)
+# Comenzar con un data frame vacío para contener los resultados
+long_df_smote_enn <- data.frame(Algorithm = character(),
+ Metric = character(),
+ Average_smote_enn = numeric(),
+ stringsAsFactors = FALSE)
+# Bucle a través de cada algoritmo
+
+for(alg in names(average_metrics)) {
+ # Para cada algoritmo, crear un data frame temporal de sus métricas
+ temp_df <- data.frame(Algorithm = alg,
+ Metric = names(average_metrics[[alg]]),
+ Average_smote_enn = unlist(average_metrics[[alg]]),
+ stringsAsFactors = FALSE)
+ 
+ # Unir el data frame temporal al data frame largo
+ long_df_smote_enn <- rbind(long_df_smote_enn, temp_df)
+}
+# Eliminar nombres de fila para asegurar que no se impriman
+rownames(long_df_smote_enn) <- NULL
+# Imprimir el data frame en formato largo limpio
+print(long_df_smote_enn)
